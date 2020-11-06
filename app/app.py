@@ -1,26 +1,34 @@
 import numpy as np
 from flask import Flask, request, jsonify, render_template
 import pickle
-
+from keras.models import load_model
+from keras.preprocessing.text import Tokenizer
+import json
 import pprint
+import pandas as pd 
+from io import BytesIO
 
-class LoggingMiddleware(object):
-    def __init__(self, app):
-        self._app = app
+class WSGICopyBody(object):
+    def __init__(self, application):
+        self.application = application
 
-    def __call__(self, env, resp):
-        errorlog = env['wsgi.errors']
-        pprint.pprint(('REQUEST', env), stream=errorlog)
-
-        def log_response(status, headers, *args):
-            pprint.pprint(('RESPONSE', status, headers), stream=errorlog)
-            return resp(status, headers, *args)
-
-        return self._app(env, log_response)
-
+    def __call__(self, environ, start_response):
+        length = int(environ.get('CONTENT_LENGTH') or 0)
+        body = environ['wsgi.input'].read(length)
+        environ['body_copy'] = body
+        environ['wsgi.input'] = BytesIO(body)
+        return self.application(environ, start_response)
 
 app = Flask(__name__)
-model = pickle.load(open('model.pkl', 'rb'))
+model=load_model('gru-model.h5')
+app.wsgi_app = WSGICopyBody(app.wsgi_app)
+
+def preprocess(req):
+    tokenizer = Tokenizer(filters='\t\n', char_level=True)
+    tokenizer.fit_on_texts(req)
+    X = tokenizer.texts_to_sequences(req)
+    X=np.asarray(X)
+    return X
 
 @app.route('/')
 def home():
@@ -28,34 +36,19 @@ def home():
 
 @app.route('/predict',methods=['POST'])
 def predict():
-    '''
-    For rendering results on HTML GUI
-    '''
 
-    req=str(request.__dict__)
-    print(request.form)
-    int_features = [str(x) for x in request.form.values()]
-    print(int_features)
-    # final_features = [np.array(int_features)]
-    # prediction = model.predict(final_features)
+    req=request.__dict__
+    print(req)
+    df = pd.DataFrame.from_dict(req) 
+    print(df)
 
-    # output = round(prediction[0], 2)
-    if('nigga' in req):
+    X=preprocess(req)
+    prediction = model.predict(X)
+    if(prediction>=0.5):
         return render_template('index.html', prediction_text='The request is malicious')
     else:
         return render_template('index.html', prediction_text='The request is not malicious')
 
-
-@app.route('/predict_api',methods=['POST'])
-def predict_api():
-    '''
-    For direct API calls trought request
-    '''
-    data = request.get_json(force=True)
-    prediction = model.predict([np.array(list(data.values()))])
-
-    output = prediction[0]
-    return jsonify(output)
 
 if __name__ == "__main__":
     app.run(debug=True)
